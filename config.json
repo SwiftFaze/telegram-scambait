@@ -1,0 +1,6 @@
+{
+  "telegram_api_id": 1234,
+  "telegram_api_hash": "",
+  "openai_api_key": "",
+  "openai_model": "gpt-4o"
+}
