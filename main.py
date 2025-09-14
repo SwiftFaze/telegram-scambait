@@ -27,16 +27,24 @@ api_hash = config["telegram_api_hash"]
 openai_api_key = config["openai_api_key"]
 openai_model = config["openai_model"]
 
-# Load system prompt
+# -----------------------------
+# Load system prompt and user profile
+# -----------------------------
 with open("prompt.json", "r", encoding="utf-8") as f:
     prompt_data = json.load(f)
-system_prompt = {"role": "system", "content": prompt_data}
 
+system_prompt = {"role": "system", "content": prompt_data["system_prompt"]}
+user_profile = prompt_data.get("user_profile", {})
+
+# -----------------------------
 # Initialize clients
+# -----------------------------
 client_ai = OpenAI(api_key=openai_api_key)
 client = TelegramClient("my_session", api_id, api_hash)
 
+# -----------------------------
 # Conversation history file
+# -----------------------------
 HISTORY_FILE = "conversation_history.json"
 if os.path.exists(HISTORY_FILE):
     with open(HISTORY_FILE, "r", encoding="utf-8") as f:
@@ -63,9 +71,22 @@ async def delayed_reply(user_id, chat_id, event):
     try:
         await asyncio.sleep(30)  # wait 30s after last message
 
+        # Prepare messages for OpenAI: system prompt + user profile + conversation
+        messages = [system_prompt]
+
+        # Include user profile as a user message
+        messages.append({
+            "role": "user",
+            "content": f"User profile info: {json.dumps(user_profile)}"
+        })
+
+        # Include previous messages from this conversation (skip system prompt)
+        messages.extend(conversations[user_id][1:])
+
+        # Generate the AI reply
         response = client_ai.chat.completions.create(
             model=openai_model,
-            messages=conversations[user_id]
+            messages=messages
         )
         reply = response.choices[0].message.content.strip()
         logger.info(f"Generated reply for user {user_id}: {reply}")
@@ -113,6 +134,7 @@ async def handler(event):
 
     logger.info(f"Received message from {user_id} in chat {chat_id}: {user_message}")
 
+    # Initialize conversation if first message
     if user_id not in conversations:
         conversations[user_id] = [system_prompt]
 
@@ -121,10 +143,12 @@ async def handler(event):
         conversations[user_id] = [system_prompt] + conversations[user_id][-MAX_HISTORY:]
     save_conversations()
 
+    # Cancel previous timer if exists
     key = (user_id, chat_id)
     if key in user_chat_timers and not user_chat_timers[key].done():
         user_chat_timers[key].cancel()
 
+    # Start delayed reply
     user_chat_timers[key] = asyncio.create_task(delayed_reply(user_id, chat_id, event))
 
 # -----------------------------
