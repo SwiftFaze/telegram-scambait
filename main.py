@@ -71,17 +71,27 @@ async def delayed_reply(user_id, chat_id, event):
     try:
         await asyncio.sleep(30)  # wait 30s after last message
 
+        # Check permissions first
+        can_send = True
+        if not event.is_private:
+            try:
+                permissions = await client.get_permissions(chat_id, "me")
+                if not permissions.send_messages:
+                    can_send = False
+            except Exception:
+                can_send = False
+
+        if not can_send:
+            logger.info(f"Ignored chat {chat_id}: no permission to send messages.")
+            return  # Do not call OpenAI
+
         # Prepare messages for OpenAI: system prompt + user profile + conversation
         messages = [system_prompt]
-
-        # Include user profile as a user message
         messages.append({
             "role": "user",
             "content": f"User profile info: {json.dumps(user_profile)}"
         })
-
-        # Include previous messages from this conversation (skip system prompt)
-        messages.extend(conversations[user_id][1:])
+        messages.extend(conversations[user_id][1:])  # skip system_prompt in history
 
         # Generate the AI reply
         response = client_ai.chat.completions.create(
@@ -97,27 +107,15 @@ async def delayed_reply(user_id, chat_id, event):
             conversations[user_id] = [system_prompt] + conversations[user_id][-MAX_HISTORY:]
         save_conversations()
 
-        # Reply in the same chat if allowed
-        can_send = True
-        if not event.is_private:
-            try:
-                permissions = await client.get_permissions(chat_id, "me")
-                if not permissions.send_messages:
-                    can_send = False
-            except Exception:
-                can_send = False
-
-        if can_send:
-            try:
-                await event.respond(reply)
-                logger.info(f"Message sent in chat {chat_id}")
-            except Exception as e:
-                logger.warning(f"Cannot send message in chat {chat_id}: {e}")
-        else:
-            logger.info(f"Ignored chat {chat_id}: no permission to send messages.")
+        # Send reply in chat
+        await event.respond(reply)
+        logger.info(f"Message sent in chat {chat_id}")
 
     except asyncio.CancelledError:
         logger.info(f"Timer cancelled for user {user_id} in chat {chat_id}, reset.")
+    except Exception as e:
+        logger.warning(f"Error in delayed_reply for {user_id} in chat {chat_id}: {e}")
+
 
 # -----------------------------
 # Message handler
