@@ -30,7 +30,7 @@ openai_model = config["openai_model"]
 # Load system prompt
 with open("prompt.json", "r", encoding="utf-8") as f:
     prompt_data = json.load(f)
-system_prompt = {"role": "system", "content": prompt_data["system_prompt"]}
+system_prompt = {"role": "system", "content": prompt_data}
 
 # Initialize clients
 client_ai = OpenAI(api_key=openai_api_key)
