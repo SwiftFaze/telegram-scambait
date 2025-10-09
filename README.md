@@ -10,6 +10,6 @@ python3 -m pip install openai
  -> exit
 
 
-nohup python3 main.py &
-ps aux | grep main.py
-kill <id>
+ edit run.sh file with file path
+
+bash run.sh
