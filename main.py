@@ -1,5 +1,6 @@
 import json
 import os
+import random
 import asyncio
 import logging
 from telethon import TelegramClient, events
@@ -69,7 +70,9 @@ def save_conversations():
 # -----------------------------
 async def delayed_reply(user_id, chat_id, event):
     try:
-        await asyncio.sleep(30)  # wait 30s after last message
+        delay = random.uniform(30, 1200)
+        logger.info(f"Waiting {delay:.1f} seconds before replying to user {user_id} in chat {chat_id}")
+        await asyncio.sleep(delay)
 
         # Check permissions first
         can_send = True
@@ -115,7 +118,6 @@ async def delayed_reply(user_id, chat_id, event):
         logger.info(f"Timer cancelled for user {user_id} in chat {chat_id}, reset.")
     except Exception as e:
         logger.warning(f"Error in delayed_reply for {user_id} in chat {chat_id}: {e}")
-
 
 # -----------------------------
 # Message handler
