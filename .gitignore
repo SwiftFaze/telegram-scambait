@@ -1,0 +1,7 @@
+/my_session.session
+*.png
+*.jpg
+*.log
+
+!assets/**/*.png
+/.idea/
