@@ -1,11 +1,13 @@
+import asyncio
 import json
+import logging
 import os
 import random
-import asyncio
-import logging
-from telethon import TelegramClient, events
+
+import requests
+from rlottie_python import LottieAnimation
 from openai import OpenAI
-import base64
+from telethon import TelegramClient, events
 
 # -----------------------------
 # Load config
@@ -18,7 +20,7 @@ api_hash = config["telegram_api_hash"]
 openai_api_key = config["openai_api_key"]
 openai_model = config["openai_model"]
 debug_mode = config["debug_mode"]
-
+max_message_history = config["max_message_history"]
 
 
 # -----------------------------
@@ -45,14 +47,14 @@ class Message:
     def __init__(self, event, me):
         self.event = event
         self.sender_id = event.sender_id
-        self.text = event.raw_text.strip() if event.raw_text else ""
+        self.text = ""
+        self.has_media = False
         self.is_photo = False
         self.is_video = False
         self.is_document = False
         self.is_private = event.is_private
         self.file_path = None
         self.event = event
-
 
         # Determine mode
         if debug_mode:
@@ -67,24 +69,78 @@ class Message:
             self.chat_id = event.chat_id
 
         if event.message.media:
-            # Check photo
             if getattr(event.message, "photo", None):
                 self.is_photo = True
-            # Check video
+                self.has_media = True
             elif getattr(event.message, "video", None):
                 self.is_video = True
+                self.has_media = True
             # Check document (includes files, PDFs, stickers, non-native images, GIFs)
             elif getattr(event.message, "document", None):
                 self.is_document = True
+                self.has_media = True
+
+        # SET MESSAGE TEXT
+        if event.raw_text:
+            raw_text = event.raw_text.strip()
+            # If message only has media and the text is a placeholder like [GIF] or [JPG], set it to ""
+            if self.has_media and raw_text.startswith("["):
+                self.text = ""
+            else:
+                self.text = raw_text
+        else:
+            self.text = ""
+
+
 
     async def download(self):
-        if self.is_photo or self.is_video or self.is_document:
-            ext = "jpg" if self.is_photo else "mp4" if self.is_video else "dat"
+        # Handle photos
+        if self.has_media and self.is_photo:
+            ext = "jpg"
             self.file_path = f"temp_{self.event.id}.{ext}"
             await self.event.download_media(self.file_path)
-            logger.info(f"Downloaded media to {self.file_path}")
-            if not self.text:
-                self.text = f"[{ext.upper()}] {self.file_path}"
+            logger.debug(f"Downloaded photo to {self.file_path}")
+
+        # Handle videos
+        elif self.has_media and self.is_video:
+            ext = "mp4"
+            # self.file_path = f"temp_{self.event.id}.{ext}"
+            # await self.event.download_media(self.file_path)
+            # logger.debug(f"Downloaded video to {self.file_path}")
+
+        # Handle documents (including .tgs stickers)
+        elif self.has_media and self.is_document:
+            mime_type = getattr(self.event.media.document, "mime_type", "")
+
+            # Telegram animated sticker
+            if "x-tgsticker" in mime_type:
+                tgs_path = f"temp_{self.event.id}.tgs"
+                await self.event.download_media(tgs_path)
+                logger.debug(f"Downloaded animated sticker to {tgs_path}")
+
+                try:
+                    # Load the sticker and save directly as GIF
+                    anim = LottieAnimation.from_tgs(tgs_path)
+                    gif_path = f"temp_{self.event.id}.gif"
+                    anim.save_animation(gif_path)
+                    logger.debug(f"Converted sticker to GIF: {gif_path}")
+
+                    # Remove the original .tgs file
+                    os.remove(tgs_path)
+
+                    self.file_path = gif_path
+                    ext = "gif"
+                except Exception as e:
+                    logger.error(f"Failed to convert .tgs to GIF: {e}")
+                    self.file_path = tgs_path
+                    ext = "tgs"
+
+            else:
+                # Generic document
+                ext = "dat"
+                self.file_path = f"temp_{self.event.id}.{ext}"
+                await self.event.download_media(self.file_path)
+                logger.debug(f"Downloaded document to {self.file_path}")
 
 
 
@@ -117,13 +173,15 @@ else:
 user_chat_timers = {}
 
 # Max messages to store per user
-MAX_HISTORY = 10
+
+
 
 def save_conversations():
     """Save conversation history to file."""
     with open(HISTORY_FILE, "w", encoding="utf-8") as f:
         json.dump(conversations, f, ensure_ascii=False, indent=2)
     logger.info("Conversation history saved.")
+
 
 # -----------------------------
 # Delayed reply function
@@ -133,22 +191,14 @@ async def delayed_reply(message):
         if not debug_mode:
             # Only apply delay in normal mode
             delay = random.uniform(30, 1200)
-            logger.info(f"Waiting {delay:.1f} seconds before replying to user {message.user_id} in chat {message.chat_id}")
+            logger.info(
+                f"Waiting {delay:.1f} seconds before replying to user {message.user_id} in chat {message.chat_id}")
             await asyncio.sleep(delay)
 
         # Check permissions first
-        can_send = True
-        if not message.is_private:
-            try:
-                permissions = await client.get_permissions(message.chat_id, "me")
-                if not permissions.send_messages:
-                    can_send = False
-            except Exception:
-                can_send = False
-
-        if not can_send:
+        if not await user_has_message_permission(message):
             logger.info(f"Ignored chat {message.chat_id}: no permission to send messages.")
-            return  # Do not call OpenAI
+            return
 
         # Prepare messages for OpenAI: system prompt + user profile + conversation
         messages = [system_prompt]
@@ -158,33 +208,19 @@ async def delayed_reply(message):
         })
         messages.extend(conversations[message.user_id][1:])  # skip system_prompt in history
 
+        response = client_ai.chat.completions.create(
+            model=openai_model,
+            messages=messages,
+        )
 
-        if message.is_photo:
-            with open(message.file_path, "rb") as f:
-                image_bytes = f.read()
-            image_b64 = base64.b64encode(image_bytes).decode("utf-8")
-            messages.append({
-                "role": "user",
-                "content": ''
-            })
-            response = client_ai.chat.completions.create(
-                model=openai_model,
-                messages=messages,
-            )
-        else:
-            # Generate the AI reply
-            response = client_ai.chat.completions.create(
-                model=openai_model,
-                messages=messages,
-
-            )
         reply = response.choices[0].message.content.strip()
         logger.info(f"Generated reply for user {message.user_id}: {reply}")
 
         # Add assistant reply to history
         conversations[message.user_id].append({"role": "assistant", "content": reply})
-        if len(conversations[message.user_id]) > MAX_HISTORY:
-            conversations[message.user_id] = [system_prompt] + conversations[message.user_id][-MAX_HISTORY:]
+        if len(conversations[message.user_id]) > max_message_history:
+            conversations[message.user_id] = [system_prompt] + conversations[message.user_id][
+                                                               -max_message_history:]
         save_conversations()
 
         # Send reply in chat
@@ -194,7 +230,21 @@ async def delayed_reply(message):
     except asyncio.CancelledError:
         logger.info(f"Timer cancelled for user {message.user_id} in chat {message.chat_id}, reset.")
     except Exception as e:
-        logger.warning(f"Error in delayed_reply for {message.user_id} in chat {message.chat_id}: {e}")
+        logger.warning(
+            f"Error in delayed_reply for {message.user_id} in chat {message.chat_id}: {e}")
+
+
+async def user_has_message_permission(message):
+    can_send = True;
+    if not message.is_private:
+        try:
+            permissions = await client.get_permissions(message.chat_id, "me")
+            if not permissions.send_messages:
+                can_send = False
+        except Exception:
+            can_send = False
+    return can_send
+
 
 # -----------------------------
 # Message handler
@@ -202,7 +252,6 @@ async def delayed_reply(message):
 
 @client.on(events.NewMessage())
 async def handler(event):
-
     me = await client.get_me()
     message = Message(event, me)
     await message.download()
@@ -211,18 +260,23 @@ async def handler(event):
     if debug_mode and message.sender_id != me.id:
         return
 
-
-
-
+    # SKIPS VIDEO, VIDEO NOT SUPPORTED
+    if message.is_video:
+        return
 
     # Initialize conversation if first message
     if message.user_id not in conversations:
         conversations[message.user_id] = [system_prompt]
 
-    # Append user message
-    conversations[message.user_id].append({"role": "user", "content": message.text})
-    if len(conversations[message.user_id]) > MAX_HISTORY:
-        conversations[message.user_id] = [system_prompt] + conversations[message.user_id][-MAX_HISTORY:]
+    # SET USER TEXT MESSAGE
+    if message.text:
+        conversations[message.user_id].append({"role": "user", "content": message.text})
+
+    await handle_media(message)
+
+    if len(conversations[message.user_id]) > max_message_history:
+        conversations[message.user_id] = [system_prompt] + conversations[message.user_id][-max_message_history:]
+
     save_conversations()
 
     # Cancel previous timer if exists
@@ -234,6 +288,44 @@ async def handler(event):
     user_chat_timers[key] = asyncio.create_task(delayed_reply(message))
 
 
+async def handle_media(message):
+    if message.has_media and not message.is_video:
+        # 1. Upload the downloaded file to tmpfiles.org
+        with open(message.file_path, "rb") as f:
+            files = {"file": f}
+            upload_resp = requests.post("https://tmpfiles.org/api/v1/upload", files=files)
+
+        # 2. Extract the file URL from the API response
+        data = upload_resp.json()
+        raw_url = data["data"]["url"]  # Example: https://tmpfiles.org/abcd1234
+
+        # 2. Convert to download URL
+        # raw_url structure: http://tmpfiles.org/<id>/<filename>
+        parts = raw_url.split("/")
+        file_id = parts[-2]
+        filename = parts[-1]
+
+        image_url = f"https://tmpfiles.org/dl/{file_id}/{filename}"
+
+        # 3. Pass to GPT
+        conversations[message.user_id].append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                }
+            ]
+        })
+        try:
+            os.remove(message.file_path)
+            logger.debug(f"Deleted local file: {message.file_path}")
+        except OSError as e:
+            logger.error(f"Error deleting file {message.file_path}: {e}")
+
+
 # -----------------------------
 # Run the bot
 # -----------------------------
@@ -241,6 +333,7 @@ async def main():
     await client.start()
     logger.info("Bot is online and waiting for messages...")
     await client.run_until_disconnected()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

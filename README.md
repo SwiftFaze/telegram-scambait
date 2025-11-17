@@ -2,8 +2,7 @@
 
 `pip install openai telethon`
 `python -m pip install --upgrade pip setuptools wheel`
-`python -m pip install telethon`
-`python -m pip install openai`
+`python -m pip install telethon openai rlottie-python Pillow`
 
 
  python3 main.py

@@ -2,6 +2,6 @@
 *.png
 *.jpg
 *.log
-
+conversation_history.json
 !assets/**/*.png
 /.idea/
