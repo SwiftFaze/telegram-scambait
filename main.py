@@ -253,12 +253,17 @@ async def user_has_message_permission(message):
 @client.on(events.NewMessage())
 async def handler(event):
     me = await client.get_me()
+    # Debug mode: only process messages from yourself
+    if debug_mode and event.sender_id != me.id:
+        return
+    if not debug_mode and event.sender_id == me.id:
+        return
+
     message = Message(event, me)
     await message.download()
 
-    # Debug mode: only process messages from yourself
-    if debug_mode and message.sender_id != me.id:
-        return
+
+
 
     # SKIPS VIDEO, VIDEO NOT SUPPORTED
     if message.is_video:
