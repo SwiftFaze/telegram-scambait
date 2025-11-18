@@ -51,6 +51,7 @@ class Message:
         self.has_media = False
         self.is_photo = False
         self.is_video = False
+        self.media_url = ""
         self.is_document = False
         self.is_private = event.is_private
         self.file_path = None
@@ -208,6 +209,20 @@ async def delayed_reply(message):
         })
         messages.extend(conversations[message.user_id][1:])  # skip system_prompt in history
 
+        if message.has_media:
+            messages.append({
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": message.media_url
+                        }
+                    }
+                ]
+            })
+
+
         response = client_ai.chat.completions.create(
             model=openai_model,
             messages=messages,
@@ -310,20 +325,8 @@ async def handle_media(message):
         file_id = parts[-2]
         filename = parts[-1]
 
-        image_url = f"https://tmpfiles.org/dl/{file_id}/{filename}"
+        message.media_url = f"https://tmpfiles.org/dl/{file_id}/{filename}"
 
-        # 3. Pass to GPT
-        conversations[message.user_id].append({
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": image_url
-                    }
-                }
-            ]
-        })
         try:
             os.remove(message.file_path)
             logger.debug(f"Deleted local file: {message.file_path}")
@@ -342,3 +345,13 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+# if __name__ == "__main__":
+#     client.start()
+#     logger.info("Bot is online and waiting for messages...")
+#     client.run_until_disconnected()
+#
+#
+#
+
+
