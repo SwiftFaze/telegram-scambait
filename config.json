@@ -1,6 +1,8 @@
 {
   "debug_mode": false,
   "max_message_history": 10,
+  "google_api_key": "1234",
+  "google_cx_key": "1234",
   "telegram_api_id": 1234,
   "telegram_api_hash": "",
   "openai_api_key": "",

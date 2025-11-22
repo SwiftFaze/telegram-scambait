@@ -1,8 +1,11 @@
 import asyncio
 import json
 import logging
-import os
 import random
+import re
+import tempfile
+import aiohttp
+import os
 
 import requests
 from rlottie_python import LottieAnimation
@@ -21,6 +24,8 @@ openai_api_key = config["openai_api_key"]
 openai_model = config["openai_model"]
 debug_mode = config["debug_mode"]
 max_message_history = config["max_message_history"]
+google_api_key = config["google_api_key"]
+google_cx_key = config["google_cx_key"]
 
 
 # -----------------------------
@@ -175,6 +180,30 @@ user_chat_timers = {}
 
 # Max messages to store per user
 
+def search_image(query=None):
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "q": query + " photo taken",
+        "cx": google_cx_key,
+        "key": google_api_key,      # your API key
+        "searchType": "image",
+        "num": 10
+    }
+    resp = requests.get(url, params=params)
+    try:
+        data = resp.json()
+    except Exception as e:
+        logger.error(f"Failed to parse JSON from Google API: {e}, text: {resp.text}")
+        return None
+
+    logger.info(f"Google API response for query '{query}': {data}")
+
+    items = data.get("items", [])
+    if not items:
+        return None
+
+    image = random.choice(items)
+    return image.get("link")
 
 
 def save_conversations():
@@ -201,27 +230,7 @@ async def delayed_reply(message):
             logger.info(f"Ignored chat {message.chat_id}: no permission to send messages.")
             return
 
-        # Prepare messages for OpenAI: system prompt + user profile + conversation
-        messages = [system_prompt]
-        messages.append({
-            "role": "user",
-            "content": f"User profile info: {json.dumps(user_profile)}"
-        })
-        messages.extend(conversations[message.user_id][1:])  # skip system_prompt in history
-
-        if message.has_media:
-            messages.append({
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": message.media_url
-                        }
-                    }
-                ]
-            })
-
+        messages = await create_gpt_prompt(message)
 
         response = client_ai.chat.completions.create(
             model=openai_model,
@@ -231,15 +240,16 @@ async def delayed_reply(message):
         reply = response.choices[0].message.content.strip()
         logger.info(f"Generated reply for user {message.user_id}: {reply}")
 
-        # Add assistant reply to history
-        conversations[message.user_id].append({"role": "assistant", "content": reply})
-        if len(conversations[message.user_id]) > max_message_history:
-            conversations[message.user_id] = [system_prompt] + conversations[message.user_id][
-                                                               -max_message_history:]
+        image_url, reply = await process_image_search(reply)
+
+        await add_reply_to_conversation(message, reply)
+
         save_conversations()
 
-        # Send reply in chat
         await message.event.respond(reply)
+
+        await send_image(message, image_url)
+
         logger.info(f"Message sent in chat {message.chat_id}")
 
     except asyncio.CancelledError:
@@ -247,6 +257,100 @@ async def delayed_reply(message):
     except Exception as e:
         logger.warning(
             f"Error in delayed_reply for {message.user_id} in chat {message.chat_id}: {e}")
+
+
+async def create_gpt_prompt(message):
+    # Prepare messages for OpenAI: system prompt + user profile + conversation
+    messages = [system_prompt]
+    messages.append({
+        "role": "user",
+        "content": f"User profile info: {json.dumps(user_profile)}"
+    })
+    messages.extend(conversations[message.user_id][1:])  # skip system_prompt in history
+    if message.has_media:
+        messages.append({
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": message.media_url
+                    }
+                }
+            ]
+        })
+    return messages
+
+
+async def process_image_search(reply):
+    # Detect and extract JSON block if it exists
+    json_block = None
+    try:
+        # Look for a JSON object in the text
+        match = re.search(r"\{.*\"fetch_image\".*\}", reply, re.DOTALL)
+        if match:
+            json_block = json.loads(match.group(0))
+    except Exception as e:
+        logger.warning(f"Failed to parse JSON block: {e}")
+    # If JSON block found, perform image search
+    image_url = None
+    if json_block and "fetch_image" in json_block:
+        query = json_block["fetch_image"].get("query", "")
+        image_url = search_image(query)
+        logger.info(f"Fetched image for query '{query}': {image_url}")
+        # Remove the JSON from the reply
+        reply = re.sub(r"\{.*\"fetch_image\".*\}", "", reply, flags=re.DOTALL).strip()
+    return image_url, reply
+
+
+async def add_reply_to_conversation(message, reply):
+    # Add assistant reply to history
+    conversations[message.user_id].append({"role": "assistant", "content": reply})
+    if len(conversations[message.user_id]) > max_message_history:
+        conversations[message.user_id] = [system_prompt] + conversations[message.user_id][
+                                                           -max_message_history:]
+
+
+async def send_image(message, image_url):
+    if not image_url:
+        logger.warning("No image URL provided to send_image()")
+        return
+
+    logger.info(f"Attempting to send image: {image_url}")
+    try:
+        # Download the image
+        async with aiohttp.ClientSession() as session:
+            async with session.get(image_url) as resp:
+                logger.info(f"HTTP GET {image_url} returned status {resp.status}")
+                if resp.status == 200:
+                    img_data = await resp.read()
+                    logger.info(f"Downloaded image data: {len(img_data)} bytes")
+
+                    # Save to a temporary file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as tmp_file:
+                        tmp_file.write(img_data)
+                        tmp_filename = tmp_file.name
+                    logger.info(f"Saved image to temporary file: {tmp_filename}")
+
+                    # Send the image as a photo
+                    try:
+                        await message.event.respond(file=tmp_filename)
+                        logger.info(f"Image sent successfully to chat {message.chat_id}")
+                    except Exception as e:
+                        logger.error(f"Failed to send image via Telegram: {e}")
+
+                    # Delete the temp file
+                    try:
+                        os.remove(tmp_filename)
+                        logger.info(f"Temporary file deleted: {tmp_filename}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete temporary file {tmp_filename}: {e}")
+
+                else:
+                    logger.warning(f"Failed to download image, HTTP status: {resp.status}")
+
+    except Exception as e:
+        logger.error(f"Unexpected error in send_image(): {e}")
 
 
 async def user_has_message_permission(message):
