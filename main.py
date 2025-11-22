@@ -1,15 +1,15 @@
 import asyncio
 import json
 import logging
+import os
 import random
 import re
 import tempfile
-import aiohttp
-import os
 
+import aiohttp
 import requests
-from rlottie_python import LottieAnimation
 from openai import OpenAI
+from rlottie_python import LottieAnimation
 from telethon import TelegramClient, events
 
 # -----------------------------
@@ -26,7 +26,6 @@ debug_mode = config["debug_mode"]
 max_message_history = config["max_message_history"]
 google_api_key = config["google_api_key"]
 google_cx_key = config["google_cx_key"]
-
 
 # -----------------------------
 # Setup logging to file
@@ -97,8 +96,6 @@ class Message:
         else:
             self.text = ""
 
-
-
     async def download(self):
         # Handle photos
         if self.has_media and self.is_photo:
@@ -149,7 +146,6 @@ class Message:
                 logger.debug(f"Downloaded document to {self.file_path}")
 
 
-
 # -----------------------------
 # Load system prompt and user profile
 # -----------------------------
@@ -178,32 +174,42 @@ else:
 # Timers keyed by (user_id, chat_id)
 user_chat_timers = {}
 
+
 # Max messages to store per user
 
 def search_image(query=None):
-    url = "https://www.googleapis.com/customsearch/v1"
-    params = {
-        "q": query + " photo taken",
-        "cx": google_cx_key,
-        "key": google_api_key,      # your API key
-        "searchType": "image",
-        "num": 10
-    }
-    resp = requests.get(url, params=params)
-    try:
-        data = resp.json()
-    except Exception as e:
-        logger.error(f"Failed to parse JSON from Google API: {e}, text: {resp.text}")
+    if not query:
         return None
 
-    logger.info(f"Google API response for query '{query}': {data}")
+    url = "https://www.googleapis.com/customsearch/v1"
+    params = {
+        "q": query,
+        "cx": google_cx_key,
+        "key": google_api_key,
+        "searchType": "image",
+        "num": 10,
+        "imgSize": "large",
+        "safe": "active"
+    }
+
+    try:
+        resp = requests.get(url, params=params)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        logger.error(
+            f"Failed to fetch or parse JSON from Google API: {e}, text: {resp.text if resp else 'no response'}")
+        return None
 
     items = data.get("items", [])
     if not items:
+        logger.warning(f"No image results found for query '{query}'")
         return None
 
     image = random.choice(items)
-    return image.get("link")
+    link = image.get("link")
+    logger.info(f"Selected image URL: {link} (query: '{query}')")
+    return link
 
 
 def save_conversations():
@@ -381,9 +387,6 @@ async def handler(event):
     message = Message(event, me)
     await message.download()
 
-
-
-
     # SKIPS VIDEO, VIDEO NOT SUPPORTED
     if message.is_video:
         return
@@ -399,7 +402,8 @@ async def handler(event):
     await handle_media(message)
 
     if len(conversations[message.user_id]) > max_message_history:
-        conversations[message.user_id] = [system_prompt] + conversations[message.user_id][-max_message_history:]
+        conversations[message.user_id] = [system_prompt] + conversations[message.user_id][
+                                                           -max_message_history:]
 
     save_conversations()
 
@@ -457,5 +461,3 @@ if __name__ == "__main__":
 #
 #
 #
-
-
