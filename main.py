@@ -26,6 +26,7 @@ debug_mode = config["debug_mode"]
 max_message_history = config["max_message_history"]
 google_api_key = config["google_api_key"]
 google_cx_key = config["google_cx_key"]
+telegram_user_id_blacklist = config["telegram_user_id_blacklist"]
 
 # -----------------------------
 # Setup logging to file
@@ -383,6 +384,11 @@ async def handler(event):
         return
     if not debug_mode and event.sender_id == me.id:
         return
+
+    if str(event.sender_id) in telegram_user_id_blacklist:
+        logger.info(f"Ignored message from blacklisted user {event.sender_id}")
+        return
+
 
     message = Message(event, me)
     await message.download()
